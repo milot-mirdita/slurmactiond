@@ -135,7 +135,12 @@ pub struct SchedulerStateSnapshot {
 }
 
 pub trait Executor {
-    fn spawn_runner(&self, entity: &github::Entity, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()>;
+    fn spawn_runner(
+        &self,
+        entity: &github::Entity,
+        target: &TargetId,
+        scheduler: &Arc<Scheduler>,
+    ) -> anyhow::Result<()>;
 }
 
 type TargetPriority = i64;
@@ -336,7 +341,9 @@ impl Scheduler {
             let pending_job_targets: Vec<_> = (sched.active_jobs)
                 .iter()
                 .filter_map(|(_, job)| match &job.state {
-                    WorkflowJobState::Pending(targets) => Some((job.entity.clone(), targets.clone())),
+                    WorkflowJobState::Pending(targets) => {
+                        Some((job.entity.clone(), targets.clone()))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -346,7 +353,10 @@ impl Scheduler {
                 if let RunnerState::Queued | RunnerState::Starting | RunnerState::Listening =
                     runner.state
                 {
-                    util::increment_or_insert(&mut unassigned_runner_targets, &(runner.info.entity.clone(), runner.info.target.clone()));
+                    util::increment_or_insert(
+                        &mut unassigned_runner_targets,
+                        &(runner.info.entity.clone(), runner.info.target.clone()),
+                    );
                 }
             }
             (pending_job_targets, unassigned_runner_targets)
@@ -355,7 +365,12 @@ impl Scheduler {
         pending_job_targets.retain(|(entity, job_targets)| {
             job_targets
                 .iter()
-                .find(|t| util::decrement_or_remove(&mut unassigned_runner_targets, &(entity.clone(), (*t).clone())))
+                .find(|t| {
+                    util::decrement_or_remove(
+                        &mut unassigned_runner_targets,
+                        &(entity.clone(), (*t).clone()),
+                    )
+                })
                 .is_none()
         });
 
@@ -582,7 +597,12 @@ impl MockExecutor {
 
 #[cfg(test)]
 impl Executor for MockExecutor {
-    fn spawn_runner(&self, entity: &github::Entity, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()> {
+    fn spawn_runner(
+        &self,
+        entity: &github::Entity,
+        target: &TargetId,
+        scheduler: &Arc<Scheduler>,
+    ) -> anyhow::Result<()> {
         let rid = scheduler.create_runner(entity.clone(), target.clone());
         self.runners.lock().unwrap().push((rid, target.clone()));
         Ok(())

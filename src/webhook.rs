@@ -236,7 +236,8 @@ async fn webhook_event(
         GithubEvent::WorkflowJob => {
             let p: WorkflowJobPayload =
                 serde_json::from_slice(&payload).map_err(|e| BadRequest(format!("{e:#}")))?;
-            let entity = config::resolve_entity(&github, &p.repository.owner.login, &p.repository.name);
+            let entity =
+                config::resolve_entity(&github, &p.repository.owner.login, &p.repository.name);
             workflow_job_event(&scheduler, entity, &p).await?;
             Ok(NO_CONTENT)
         }
@@ -284,7 +285,13 @@ async fn schedule_all_pending_jobs(github_config: &GithubConfig, scheduler: &Arc
         })
         .into_iter()
         .map(|job| {
-            if let Err(e) = scheduler.job_enqueued(github_config.entity.clone(), job.job_id, &job.name, &job.url, &job.labels) {
+            if let Err(e) = scheduler.job_enqueued(
+                github_config.entity.clone(),
+                job.job_id,
+                &job.name,
+                &job.url,
+                &job.labels,
+            ) {
                 error!("Cannot enqueue pre-existing job: {e:#}");
             }
         })

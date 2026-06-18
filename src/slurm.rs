@@ -53,7 +53,11 @@ pub struct RunnerJob {
 }
 
 impl RunnerJob {
-    pub fn spawn(config_file: &ConfigFile, entity: &github::Entity, target: &TargetId) -> anyhow::Result<Self> {
+    pub fn spawn(
+        config_file: &ConfigFile,
+        entity: &github::Entity,
+        target: &TargetId,
+    ) -> anyhow::Result<Self> {
         let cfg = &config_file.config;
 
         let name = format!("{}-{}", &cfg.slurm.job_name, &target);
@@ -226,7 +230,12 @@ impl SlurmExecutor {
 }
 
 impl scheduler::Executor for SlurmExecutor {
-    fn spawn_runner(&self, entity: &github::Entity, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()> {
+    fn spawn_runner(
+        &self,
+        entity: &github::Entity,
+        target: &TargetId,
+        scheduler: &Arc<Scheduler>,
+    ) -> anyhow::Result<()> {
         let runner_id = scheduler.create_runner(entity.clone(), target.clone());
 
         let slurm_runner = RunnerJob::spawn(&self.config_file, entity, &target)

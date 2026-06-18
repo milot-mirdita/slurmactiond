@@ -241,10 +241,7 @@ pub async fn run(
             .with_context(|| "Error installing GitHub Actions Runner")?;
     }
 
-    info!(
-        "Generating runner registration token for {}",
-        entity
-    );
+    info!("Generating runner registration token for {}", entity);
     let registration_token = async_retry_after(API_COOLDOWN, API_ATTEMPTS, || {
         github::generate_runner_registration_token(&entity, &github.api_token)
     })

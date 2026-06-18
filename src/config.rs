@@ -133,7 +133,9 @@ where
         }
 
         fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-            Ok(vec![GithubConfig::deserialize(MapAccessDeserializer::new(map))?])
+            Ok(vec![GithubConfig::deserialize(
+                MapAccessDeserializer::new(map),
+            )?])
         }
 
         fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
@@ -151,11 +153,7 @@ pub fn github_for_entity<'a>(
     configs.iter().find(|g| &g.entity == entity)
 }
 
-pub fn resolve_entity(
-    configs: &[GithubConfig],
-    owner: &str,
-    repo: &str,
-) -> Option<github::Entity> {
+pub fn resolve_entity(configs: &[GithubConfig], owner: &str, repo: &str) -> Option<github::Entity> {
     let mut org = None;
     for g in configs {
         match &g.entity {
