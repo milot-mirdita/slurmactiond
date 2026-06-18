@@ -8,6 +8,7 @@ use nix::unistd::getuid;
 use tokio::process::{Child, Command};
 
 use crate::config::{Config, ConfigFile};
+use crate::github;
 use crate::ipc;
 use crate::ipc::RunnerMetadata;
 use crate::scheduler::{self, Scheduler, TargetId};
@@ -52,7 +53,7 @@ pub struct RunnerJob {
 }
 
 impl RunnerJob {
-    pub fn spawn(config_file: &ConfigFile, target: &TargetId) -> anyhow::Result<Self> {
+    pub fn spawn(config_file: &ConfigFile, entity: &github::Entity, target: &TargetId) -> anyhow::Result<Self> {
         let cfg = &config_file.config;
 
         let name = format!("{}-{}", &cfg.slurm.job_name, &target);
@@ -71,6 +72,7 @@ impl RunnerJob {
         args.push("-c".into());
         args.push(config_file.path.as_os_str().to_owned());
         args.push("runner".into());
+        args.push(entity.to_string().into());
         args.push(target.0.as_str().into());
 
         if log::log_enabled!(log::Level::Debug) {
@@ -224,10 +226,10 @@ impl SlurmExecutor {
 }
 
 impl scheduler::Executor for SlurmExecutor {
-    fn spawn_runner(&self, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()> {
-        let runner_id = scheduler.create_runner(target.clone());
+    fn spawn_runner(&self, entity: &github::Entity, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()> {
+        let runner_id = scheduler.create_runner(entity.clone(), target.clone());
 
-        let slurm_runner = RunnerJob::spawn(&self.config_file, &target)
+        let slurm_runner = RunnerJob::spawn(&self.config_file, entity, &target)
             .with_context(|| "Submitting job to SLURM")?;
 
         let scheduler = scheduler.clone();

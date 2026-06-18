@@ -174,6 +174,7 @@ async fn unpack_tar_gz(tarball: &Path, into_dir: &Path) -> anyhow::Result<()> {
 #[actix_web::main]
 pub async fn run(
     config_file: ConfigFile,
+    entity: github::Entity,
     target: TargetId,
     job: slurm::JobId,
 ) -> anyhow::Result<()> {
@@ -181,6 +182,8 @@ pub async fn run(
     const API_COOLDOWN: Duration = Duration::from_secs(30);
 
     let cfg = &config_file.config;
+    let github = crate::config::github_for_entity(&cfg.github, &entity)
+        .with_context(|| format!("No GitHub configuration for entity {entity}"))?;
     let runner_name = format!("{}-{}-{}", cfg.runner.registration.name, target, job);
 
     let active_jobs = slurm::active_jobs(&cfg)
@@ -216,7 +219,7 @@ pub async fn run(
     } else {
         info!("Installing Github Actions Runner");
         let tarball = async_retry_after(API_COOLDOWN, API_ATTEMPTS, || {
-            github::locate_runner_tarball(&cfg.runner.platform, &cfg.github.api_token)
+            github::locate_runner_tarball(&cfg.runner.platform, &github.api_token)
         })
         .await
         .with_context(|| "Error locating latest GitHub Actions Runner release")?;
@@ -240,10 +243,10 @@ pub async fn run(
 
     info!(
         "Generating runner registration token for {}",
-        cfg.github.entity
+        entity
     );
     let registration_token = async_retry_after(API_COOLDOWN, API_ATTEMPTS, || {
-        github::generate_runner_registration_token(&cfg.github.entity, &cfg.github.api_token)
+        github::generate_runner_registration_token(&entity, &github.api_token)
     })
     .await
     .with_context(|| "Error generating GitHub Runner Registration Token")?;
@@ -266,7 +269,7 @@ pub async fn run(
     async_retry_after(REGISTER_COOLDOWN, REGISTER_ATTEMPTS, || {
         register_instance(
             &work_dir.path,
-            &cfg.github.entity,
+            &entity,
             &registration_token,
             &runner_name,
             &all_labels,

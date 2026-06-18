@@ -56,6 +56,7 @@ pub struct WorkflowJobInfo {
 
 #[derive(Clone, Serialize)]
 pub struct ActiveWorkflowJob {
+    pub entity: github::Entity,
     pub info: WorkflowJobInfo,
     pub state: WorkflowJobState,
     #[serde(serialize_with = "util::time_as_iso8601")]
@@ -91,6 +92,7 @@ pub enum RunnerTermination {
 #[derive(Clone, Serialize)]
 pub struct RunnerInfo {
     pub id: RunnerId,
+    pub entity: github::Entity,
     pub target: TargetId,
     pub metadata: Option<RunnerMetadata>,
 }
@@ -133,7 +135,7 @@ pub struct SchedulerStateSnapshot {
 }
 
 pub trait Executor {
-    fn spawn_runner(&self, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()>;
+    fn spawn_runner(&self, entity: &github::Entity, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()>;
 }
 
 type TargetPriority = i64;
@@ -194,7 +196,7 @@ impl Scheduler {
         f(&mut self.state.lock().expect("Poisoned Mutex"))
     }
 
-    pub fn create_runner(&self, target: TargetId) -> RunnerId {
+    pub fn create_runner(&self, entity: github::Entity, target: TargetId) -> RunnerId {
         let state_changed_at = SystemTime::now();
         self.with_state(|sched| {
             let id = sched.next_runner_id;
@@ -202,6 +204,7 @@ impl Scheduler {
             let runner = ActiveRunner {
                 info: RunnerInfo {
                     id,
+                    entity,
                     target,
                     metadata: None,
                 },
@@ -333,7 +336,7 @@ impl Scheduler {
             let pending_job_targets: Vec<_> = (sched.active_jobs)
                 .iter()
                 .filter_map(|(_, job)| match &job.state {
-                    WorkflowJobState::Pending(targets) => Some(targets.clone()),
+                    WorkflowJobState::Pending(targets) => Some((job.entity.clone(), targets.clone())),
                     _ => None,
                 })
                 .collect();
@@ -343,22 +346,22 @@ impl Scheduler {
                 if let RunnerState::Queued | RunnerState::Starting | RunnerState::Listening =
                     runner.state
                 {
-                    util::increment_or_insert(&mut unassigned_runner_targets, &runner.info.target);
+                    util::increment_or_insert(&mut unassigned_runner_targets, &(runner.info.entity.clone(), runner.info.target.clone()));
                 }
             }
             (pending_job_targets, unassigned_runner_targets)
         });
 
-        pending_job_targets.retain(|job_targets| {
+        pending_job_targets.retain(|(entity, job_targets)| {
             job_targets
                 .iter()
-                .find(|t| util::decrement_or_remove(&mut unassigned_runner_targets, t))
+                .find(|t| util::decrement_or_remove(&mut unassigned_runner_targets, &(entity.clone(), (*t).clone())))
                 .is_none()
         });
 
-        for targets in &pending_job_targets {
+        for (entity, targets) in &pending_job_targets {
             info!("Spawning runner for target {}", targets[0]);
-            self.executor.spawn_runner(&targets[0], self)?;
+            self.executor.spawn_runner(entity, &targets[0], self)?;
         }
 
         Ok(())
@@ -384,6 +387,7 @@ impl Scheduler {
 
     pub fn job_enqueued<'c>(
         self: &Arc<Self>,
+        entity: github::Entity,
         job_id: github::WorkflowJobId,
         name: &str,
         url: &str,
@@ -402,6 +406,7 @@ impl Scheduler {
                     ))),
                     Entry::Vacant(entry) => {
                         entry.insert(ActiveWorkflowJob {
+                            entity,
                             info: WorkflowJobInfo {
                                 id: job_id,
                                 name: name.to_owned(),
@@ -577,8 +582,8 @@ impl MockExecutor {
 
 #[cfg(test)]
 impl Executor for MockExecutor {
-    fn spawn_runner(&self, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()> {
-        let rid = scheduler.create_runner(target.clone());
+    fn spawn_runner(&self, entity: &github::Entity, target: &TargetId, scheduler: &Arc<Scheduler>) -> anyhow::Result<()> {
+        let rid = scheduler.create_runner(entity.clone(), target.clone());
         self.runners.lock().unwrap().push((rid, target.clone()));
         Ok(())
     }
@@ -588,6 +593,7 @@ impl Executor for MockExecutor {
 fn test_scheduler() {
     env_logger::init();
 
+    let entity = || github::Entity::Organization("org".to_owned());
     let runner_labels = vec!["base-label-1".to_owned(), "base-label-2".to_owned()];
     let targets = vec![
         Target {
@@ -611,6 +617,7 @@ fn test_scheduler() {
 
     scheduler
         .job_enqueued(
+            entity(),
             github::WorkflowJobId(1),
             "job 1",
             "http://job1",
@@ -704,6 +711,7 @@ fn test_scheduler() {
 
     scheduler
         .job_enqueued(
+            entity(),
             github::WorkflowJobId(3),
             "job 3",
             "http://job3",
@@ -752,6 +760,7 @@ fn test_scheduler() {
 
     scheduler
         .job_enqueued(
+            entity(),
             github::WorkflowJobId(4),
             "job 4",
             "http://job4",

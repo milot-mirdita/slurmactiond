@@ -10,6 +10,7 @@ use log::error;
 use nix::unistd::isatty;
 
 use crate::config::ConfigFile;
+use crate::github::Entity;
 use crate::scheduler::TargetId;
 
 mod config;
@@ -26,7 +27,7 @@ mod webhook;
 #[derive(Subcommand, Debug)]
 enum Command {
     Server,
-    Runner { target: TargetId },
+    Runner { entity: Entity, target: TargetId },
 }
 
 #[derive(Parser, Debug)]
@@ -80,10 +81,10 @@ fn main_inner() -> anyhow::Result<()> {
         Command::Server => {
             webhook::main(config_file).with_context(|| "Error while serving webhook over HTTP")
         }
-        Command::Runner { target } => {
+        Command::Runner { entity, target } => {
             let job_id = slurm::current_job()
                 .with_context(|| "Failed to determine the SLURM job id of this process")?;
-            runner::run(config_file, target, job_id)
+            runner::run(config_file, entity, target, job_id)
         }
     }
 }

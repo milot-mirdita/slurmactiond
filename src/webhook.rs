@@ -15,7 +15,7 @@ use crate::config::{ConfigFile, GithubConfig, HttpConfig};
 use crate::github::{WorkflowJob, WorkflowJobConclusion, WorkflowStatus};
 use crate::scheduler::{self, Scheduler, SchedulerStateSnapshot, WorkflowJobTermination};
 use crate::slurm::SlurmExecutor;
-use crate::{github, paths};
+use crate::{config, github, paths};
 
 type StaticContent = (&'static str, StatusCode);
 type StaticResult = actix_web::Result<StaticContent>;
@@ -61,13 +61,26 @@ fn internal_server_error(e: impl Display) -> InternalServerError {
 }
 
 #[derive(Deserialize, Debug, PartialEq, Eq)]
+struct EventRepositoryOwner {
+    login: String,
+}
+
+#[derive(Deserialize, Debug, PartialEq, Eq)]
+struct EventRepository {
+    name: String,
+    owner: EventRepositoryOwner,
+}
+
+#[derive(Deserialize, Debug, PartialEq, Eq)]
 struct WorkflowJobPayload {
     action: WorkflowStatus,
     workflow_job: WorkflowJob,
+    repository: EventRepository,
 }
 
 async fn workflow_job_event(
     scheduler: &Arc<Scheduler>,
+    entity: Option<github::Entity>,
     payload: &WorkflowJobPayload,
 ) -> StaticResult {
     let WorkflowJobPayload {
@@ -83,6 +96,7 @@ async fn workflow_job_event(
                 conclusion,
                 ..
             },
+        ..
     } = payload;
 
     debug!("Workflow job {job_id} of run {run_id} ({workflow_name}) is {action:?}");
@@ -92,9 +106,15 @@ async fn workflow_job_event(
         .ok_or_else(|| BadRequest("workflow_job.runner_name missing".to_owned()));
 
     let result = match action {
-        WorkflowStatus::Queued => {
-            scheduler.job_enqueued(*job_id, workflow_name, workflow_url, job_labels)
-        }
+        WorkflowStatus::Queued => match entity {
+            Some(entity) => {
+                scheduler.job_enqueued(entity, *job_id, workflow_name, workflow_url, job_labels)
+            }
+            None => {
+                debug!("Ignoring queued job {job_id} from unconfigured entity");
+                return Ok(NO_CONTENT);
+            }
+        },
         WorkflowStatus::InProgress => scheduler.job_processing(*job_id, runner_name?.as_str()),
         WorkflowStatus::Completed => {
             let conclusion = conclusion
@@ -202,6 +222,7 @@ async fn webhook_event(
     payload: web::Bytes,
     scheduler: web::Data<Scheduler>,
     http_config: web::Data<HttpConfig>,
+    github: web::Data<Vec<GithubConfig>>,
 ) -> StaticResult {
     use hmac::Mac;
     type HmacSha256 = hmac::Hmac<sha2::Sha256>;
@@ -213,8 +234,10 @@ async fn webhook_event(
 
     match event.0 {
         GithubEvent::WorkflowJob => {
-            let p = serde_json::from_slice(&payload).map_err(|e| BadRequest(format!("{e:#}")))?;
-            workflow_job_event(&scheduler, &p).await?;
+            let p: WorkflowJobPayload =
+                serde_json::from_slice(&payload).map_err(|e| BadRequest(format!("{e:#}")))?;
+            let entity = config::resolve_entity(&github, &p.repository.owner.login, &p.repository.name);
+            workflow_job_event(&scheduler, entity, &p).await?;
             Ok(NO_CONTENT)
         }
         GithubEvent::Other => Ok(NO_CONTENT),
@@ -261,7 +284,7 @@ async fn schedule_all_pending_jobs(github_config: &GithubConfig, scheduler: &Arc
         })
         .into_iter()
         .map(|job| {
-            if let Err(e) = scheduler.job_enqueued(job.job_id, &job.name, &job.url, &job.labels) {
+            if let Err(e) = scheduler.job_enqueued(github_config.entity.clone(), job.job_id, &job.name, &job.url, &job.labels) {
                 error!("Cannot enqueue pre-existing job: {e:#}");
             }
         })
@@ -298,6 +321,7 @@ pub async fn main(config_file: ConfigFile) -> anyhow::Result<()> {
         let rc_scheduler = web::Data::from(scheduler.clone());
         let rc_tera = web::Data::new(tera);
         let rc_http_config = web::Data::new(config_file.config.http.clone());
+        let rc_github = web::Data::new(config_file.config.github.clone());
         HttpServer::new(move || {
             let static_files = actix_files::Files::new("/static", &static_path)
                 .prefer_utf8(true)
@@ -312,6 +336,7 @@ pub async fn main(config_file: ConfigFile) -> anyhow::Result<()> {
                 .app_data(rc_scheduler.clone())
                 .app_data(rc_tera.clone())
                 .app_data(rc_http_config.clone())
+                .app_data(rc_github.clone())
                 .service(index)
                 .service(webhook_event)
                 .service(static_files.clone())
@@ -320,7 +345,11 @@ pub async fn main(config_file: ConfigFile) -> anyhow::Result<()> {
         .run()
     };
 
-    let update = schedule_all_pending_jobs(&config_file.config.github, &scheduler);
+    let update = async {
+        for github_config in &config_file.config.github {
+            schedule_all_pending_jobs(github_config, &scheduler).await;
+        }
+    };
 
     let (server_result, ()) = futures_util::join!(server, update);
     Ok(server_result?)
@@ -347,13 +376,19 @@ fn test_deserialize_payload() {
                 status: InProgress,
                 conclusion: None,
             },
+            repository: EventRepository {
+                name: String::from("example-workflow"),
+                owner: EventRepositoryOwner {
+                    login: String::from("octo-org"),
+                },
+            },
         }
     )
 }
 
 #[test]
 fn test_render_index() {
-    use crate::github::WorkflowJobId;
+    use crate::github::{Entity, WorkflowJobId};
     use crate::ipc::RunnerMetadata;
     use crate::scheduler::{
         ActiveRunner, ActiveWorkflowJob, AssignedRunner, RunnerId, RunnerInfo, RunnerState,
@@ -367,9 +402,11 @@ fn test_render_index() {
     tera.add_raw_template("index", include_str!("../res/html/index.html"))
         .unwrap();
 
+    let entity = || Entity::Organization("octo-org".to_owned());
     let mut state = SchedulerStateSnapshot {
         active_jobs: vec![
             ActiveWorkflowJob {
+                entity: entity(),
                 info: WorkflowJobInfo {
                     id: WorkflowJobId(42),
                     name: "Job X".to_owned(),
@@ -379,6 +416,7 @@ fn test_render_index() {
                 state_changed_at: SystemTime::now(),
             },
             ActiveWorkflowJob {
+                entity: entity(),
                 info: WorkflowJobInfo {
                     id: WorkflowJobId(42),
                     name: "Job A".to_owned(),
@@ -391,6 +429,7 @@ fn test_render_index() {
                 state_changed_at: SystemTime::now(),
             },
             ActiveWorkflowJob {
+                entity: entity(),
                 info: WorkflowJobInfo {
                     id: WorkflowJobId(456),
                     name: "Job B".to_owned(),
@@ -400,6 +439,7 @@ fn test_render_index() {
                 state_changed_at: SystemTime::now(),
             },
             ActiveWorkflowJob {
+                entity: entity(),
                 info: WorkflowJobInfo {
                     id: WorkflowJobId(789),
                     name: "Job C".to_owned(),
@@ -411,6 +451,7 @@ fn test_render_index() {
                 state_changed_at: SystemTime::now(),
             },
             ActiveWorkflowJob {
+                entity: entity(),
                 info: WorkflowJobInfo {
                     id: WorkflowJobId(987),
                     name: "Job on removed runner".to_owned(),
@@ -425,6 +466,7 @@ fn test_render_index() {
         active_runners: vec![
             ActiveRunner {
                 info: RunnerInfo {
+                    entity: entity(),
                     id: scheduler::RunnerId(0),
                     target: TargetId("target-a".to_string()),
                     metadata: Some(RunnerMetadata {
@@ -439,6 +481,7 @@ fn test_render_index() {
             },
             ActiveRunner {
                 info: RunnerInfo {
+                    entity: entity(),
                     id: scheduler::RunnerId(2),
                     target: TargetId("target-b".to_string()),
                     metadata: None,
@@ -448,6 +491,7 @@ fn test_render_index() {
             },
             ActiveRunner {
                 info: RunnerInfo {
+                    entity: entity(),
                     id: scheduler::RunnerId(3),
                     target: TargetId("target-b".to_string()),
                     metadata: Some(RunnerMetadata {
@@ -462,6 +506,7 @@ fn test_render_index() {
             },
             ActiveRunner {
                 info: RunnerInfo {
+                    entity: entity(),
                     id: scheduler::RunnerId(4),
                     target: TargetId("target-b".to_string()),
                     metadata: Some(RunnerMetadata {
@@ -476,6 +521,7 @@ fn test_render_index() {
             },
             ActiveRunner {
                 info: RunnerInfo {
+                    entity: entity(),
                     id: scheduler::RunnerId(5),
                     target: TargetId("target-a".to_string()),
                     metadata: Some(RunnerMetadata {
@@ -535,6 +581,7 @@ fn test_render_index() {
         runner_history: vec![
             TerminatedRunner {
                 info: RunnerInfo {
+                    entity: entity(),
                     id: RunnerId(776),
                     target: TargetId("target-a".to_string()),
                     metadata: None,
@@ -544,6 +591,7 @@ fn test_render_index() {
             },
             TerminatedRunner {
                 info: RunnerInfo {
+                    entity: entity(),
                     id: RunnerId(777),
                     target: TargetId("target-b".to_string()),
                     metadata: None,
@@ -553,6 +601,7 @@ fn test_render_index() {
             },
             TerminatedRunner {
                 info: RunnerInfo {
+                    entity: entity(),
                     id: RunnerId(778),
                     target: TargetId("target-a".to_string()),
                     metadata: None,

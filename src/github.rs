@@ -22,8 +22,8 @@ util::literal_types! {
     pub struct WorkflowJobId(pub u64);
 }
 
-#[derive(Clone, Deserialize, Debug, PartialEq, Eq)]
-#[serde(try_from = "&str")]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq, Hash)]
+#[serde(try_from = "&str", into = "String")]
 pub enum Entity {
     Organization(String),
     Repository(String, String),
@@ -35,6 +35,19 @@ impl Display for Entity {
             Entity::Organization(org) => write!(f, "{org}"),
             Entity::Repository(org, repo) => write!(f, "{org}/{repo}"),
         }
+    }
+}
+
+impl From<Entity> for String {
+    fn from(e: Entity) -> String {
+        e.to_string()
+    }
+}
+
+impl std::str::FromStr for Entity {
+    type Err = InvalidEntityError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
     }
 }
 
