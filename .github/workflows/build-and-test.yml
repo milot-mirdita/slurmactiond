@@ -7,13 +7,10 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: [ self-hosted, slurm ]
-    container:
-      image: 'slurmactiond-build:1.64'
-      volumes:
-        - sccache:/sccache
+    runs-on: "${{ vars.USE_GITHUB_RUNNER != 'true' && fromJSON('[\"self-hosted\", \"slurm\"]') || 'ubuntu-latest' }}"
+    container: "${{ vars.USE_GITHUB_RUNNER != 'true' && fromJSON('{\"image\": \"slurmactiond-build:1.64\", \"volumes\": [\"sccache:/sccache\"]}') || null }}"
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Check Formatting
         run: cargo fmt --check --message-format short
       - name: Build (Debug)
@@ -23,7 +20,7 @@ jobs:
       - name: Build (Release)
         run: cargo build --release
       - name: Archive Release
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: Release
           path: target/release/slurmactiond
