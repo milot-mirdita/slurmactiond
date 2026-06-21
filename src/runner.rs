@@ -171,6 +171,25 @@ async fn unpack_tar_gz(tarball: &Path, into_dir: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("Unpacking archive `{}` with tar", tarball.display()))
 }
 
+// A filesystem-safe directory slug for an entity with safe characters plus hash
+fn entity_work_dir(entity: &github::Entity) -> String {
+    use sha2::{Digest, Sha256};
+    let id = entity.to_string();
+    let slug: String = (id.chars())
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!(
+        "{slug}-{}",
+        hex::encode(&Sha256::digest(id.as_bytes())[..8])
+    )
+}
+
 #[actix_web::main]
 pub async fn run(
     config_file: ConfigFile,
@@ -190,8 +209,16 @@ pub async fn run(
         .await
         .with_context(|| "Error listing active slurm jobs")?;
 
-    let work_dir = WorkDir::lock(&cfg.runner.work_dir.join(&*target), job, &active_jobs)
-        .with_context(|| "Cannot lock private working directory")?;
+    // Isolate the runner installation per entity
+    let work_dir = WorkDir::lock(
+        &cfg.runner
+            .work_dir
+            .join(&*target)
+            .join(entity_work_dir(&entity)),
+        job,
+        &active_jobs,
+    )
+    .with_context(|| "Cannot lock private working directory")?;
     let host_name = gethostname()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "(unknown hostname)".to_string());
@@ -298,4 +325,16 @@ pub async fn run(
         }
     }
     run_result
+}
+
+#[test]
+fn test_entity_work_dir() {
+    use github::Entity::{Organization, Repository};
+    let repo = entity_work_dir(&Repository("foo".into(), "bar".into()));
+    assert!(repo.starts_with("foo_bar-"));
+    // distinct entities never share a directory, even on a case-insensitive filesystem
+    assert_ne!(repo, entity_work_dir(&Organization("foo".into())));
+    // a `..` component cannot produce a traversal-prone directory name
+    let dotdot = entity_work_dir(&Repository("..".into(), "..".into()));
+    assert!(!dotdot.contains('/') && dotdot != ".." && dotdot.starts_with(".._..-"));
 }
